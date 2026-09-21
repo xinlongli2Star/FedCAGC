@@ -1,61 +1,144 @@
 # FedCAGC: Conflict-Aware Gradient Correction for Federated Learning Watermarking
 
-本仓库提供论文 **《基于冲突感知梯度修正的联邦学习水印方法》** 的主要实验、审稿补充实验、TraMark 对比实验以及微调/剪枝鲁棒性实验代码。本文最终实验统一采用 V2 协议。
+> Code and reproducibility package for **《基于冲突感知梯度修正的联邦学习水印方法》**.
 
-> **重要说明**
->
-> 1. 最终论文主对比方法为：FedAvg、FedIPR、FLWB、FedAWM、TraMark 和 FedCAGC。
-> 2. TraMark 复现实验使用与 FedCAGC 完全相同的客户端划分和水印 train/test 索引。因此，运行 TraMark 前必须先完成相同 dataset/seed 的 FedCAGC 主实验。
-> 3. PCGrad-history 是面向本研究联邦水印场景构造的 **机制级适配基线**，不是原始 PCGrad 的直接复现。
+FedCAGC is designed for **multi-client black-box watermarking in federated learning**. The method focuses on negative interference among client watermark gradients. It maintains historical watermark-gradient prototypes on the server and performs conflict-aware correction only in the final-classifier subspace, while keeping the global aggregation rule as standard FedAvg.
 
 ---
 
-## 1. Repository structure
+## Highlights
+
+- **Unified V2 protocol**: 10 clients, 100 communication rounds, 3 random seeds, Dirichlet Non-IID α=0.5.
+- **Strict watermark train/test separation**: 100 watermark-training samples/client from the official MNIST train split and 200 watermark-test samples/client from the official MNIST test split.
+- **Conflict-aware correction**: detect negative conflicts by cosine similarity, process stronger conflicts first, and re-check after each projection.
+- **Low-dimensional correction space**: correction is restricted to the final classifier rather than the full model.
+- **Historical prototype design**: round 1 performs normal training and initializes prototypes; correction starts from round 2.
+- **Reproducibility package**: main comparison, ablation, PCGrad-history, TraMark, sensitivity, runtime/storage/communication, privacy pressure test, and fine-tuning/pruning robustness.
+
+---
+
+## Method overview
+
+For client `i`, FedCAGC uses the current watermark gradient of the final classifier and the historical watermark-gradient prototypes of the other clients.
 
 ```text
-FedCAGC_GitHub_release/
+Round 1
+  Local main-task + watermark training
+            │
+            ├── upload local model ───────────────► FedAvg
+            └── upload raw watermark gradient ───► initialize prototypes
+
+Round 2+
+  Global model + historical prototypes
+            │
+            ▼
+  current watermark gradient g_i
+            │
+            ├── cosine similarity with other prototypes
+            ├── keep negative-conflict candidates only
+            ├── sort by conflict strength: most negative first
+            ├── sequential projection + conflict re-check
+            └── bounded norm compensation
+            │
+            ▼
+  continue local optimization ───────────────────► FedAvg
+                                                    │
+                                                    └── EMA prototype update
+```
+
+The correction rule removes **negative conflict components only**. Positive overlap is not explicitly removed.
+
+---
+
+## Repository structure
+
+```text
+FedCAGC/
 ├── README.md
 ├── requirements.txt
-├── fedcagc_v2_all_methods.py          # 主实验 + FedCAGC + 主要基线 + 消融/敏感性
-├── fedcagc_v2_review_experiments.py   # 审稿机制实验 + PCGrad-history
-├── fedcagc_v2_offline_review.py       # 所有权、顺序重放、原型一致性、泄露、统计
-├── fedcagc_v2_robustness.py           # 微调/剪枝鲁棒性
-└── fedcagc_v2_tramark.py              # TraMark (ICLR 2026) 统一协议复现
+├── SHA256SUMS.txt
+├── fedcagc_v2_all_methods.py
+├── fedcagc_v2_review_experiments.py
+├── fedcagc_v2_offline_review.py
+├── fedcagc_v2_robustness.py
+└── fedcagc_v2_tramark.py
 ```
 
-运行后建议使用以下目录结构：
-
-```text
-results/
-├── main/
-└── reviewer/
-    ├── ablation/
-    ├── mechanism/
-    ├── offline/
-    ├── pcgrad/
-    ├── robustness/
-    ├── runtime/
-    ├── sensitivity/
-    └── tramark/
-```
+| File                               | Purpose                                                      |
+| ---------------------------------- | ------------------------------------------------------------ |
+| `fedcagc_v2_all_methods.py`        | Main experiments, FedCAGC, FedAvg, FedIPR, FLWB, FedAWM, ablation, sensitivity and runtime profiling |
+| `fedcagc_v2_review_experiments.py` | PCGrad-history, same-round fresh-gradient reference, last-two-FC mechanism experiments |
+| `fedcagc_v2_offline_review.py`     | Client-level ownership analysis, wrong-key evaluation, prototype consistency, projection-order replay, leakage pressure test, statistics |
+| `fedcagc_v2_robustness.py`         | Fine-tuning and pruning robustness                           |
+| `fedcagc_v2_tramark.py`            | TraMark reproduction under the unified V2 protocol           |
 
 ---
 
-## 2. Environment
+## Experimental protocol
 
-### 2.1 Original experimental environment
+### Federated learning setting
 
-| Item | Configuration |
-|---|---|
-| OS | Ubuntu 22.04.4 LTS 64-bit |
-| Python | 3.8.12 |
-| PyTorch | 1.10.1 + CUDA 11.3 |
-| NumPy | 1.21.6 |
-| GPU | NVIDIA RTX 4090D 24 GB |
-| CPU | AMD EPYC 9654 |
-| RAM | 755 GB |
+| Parameter            |                            Value |
+| -------------------- | -------------------------------: |
+| Main datasets        | Fashion-MNIST (FMNIST), CIFAR-10 |
+| Clients              |                               10 |
+| Communication rounds |                              100 |
+| Seeds                |                 3047, 3048, 3049 |
+| Data partition       |                Dirichlet Non-IID |
+| Dirichlet α          |                              0.5 |
+| Local epochs         |                                5 |
+| Batch size           |                               64 |
+| Optimizer            |                              SGD |
+| Learning rate        |                             0.01 |
+| Momentum             |                              0.9 |
+| Weight decay         |                             1e-4 |
+| Gradient clipping    |                             20.0 |
+| Server aggregation   |                  weighted FedAvg |
 
-PyTorch 1.10.1 官方对应 torchvision 0.11.2。GPU 环境可使用：
+### Watermark setting
+
+| Parameter             |                                          Value |
+| --------------------- | ---------------------------------------------: |
+| Watermark source      |                                          MNIST |
+| WM train              | 100 samples/client, official MNIST train split |
+| WM test               |  200 samples/client, official MNIST test split |
+| WM train/test overlap |                                           none |
+| WM loss weight        |                                            1.0 |
+
+### FedCAGC default setting
+
+| Parameter                         |                                 Value |
+| --------------------------------- | ------------------------------------: |
+| Correction scope                  |                      final classifier |
+| EMA coefficient `rho`             |                                   0.9 |
+| Negative-conflict threshold `tau` |                                   0.0 |
+| Candidate order                   |              initial cosine ascending |
+| Re-check after projection         |                                   yes |
+| Norm compensation                 |                                   yes |
+| Maximum compensation scale        |                                   2.0 |
+| Prototype source                  | raw / uncorrected watermark gradients |
+| Prototype update                  |                EMA + L2 normalization |
+| Round 1                           |             cold start, no correction |
+| Round 2+                          |             conflict-aware correction |
+
+---
+
+## Environment
+
+The reported experiments were conducted with:
+
+| Item        | Configuration             |
+| ----------- | ------------------------- |
+| OS          | Ubuntu 22.04.4 LTS 64-bit |
+| Python      | 3.8.12                    |
+| PyTorch     | 1.10.1 + CUDA 11.3        |
+| torchvision | 0.11.2                    |
+| NumPy       | 1.21.6                    |
+| GPU         | NVIDIA RTX 4090D 24 GB    |
+| CPU         | AMD EPYC 9654             |
+| RAM         | 755 GB                    |
+
+Recommended installation:
 
 ```bash
 conda create -n fedcagc python=3.8 -y
@@ -64,71 +147,11 @@ conda install pytorch==1.10.1 torchvision==0.11.2 torchaudio==0.10.1 cudatoolkit
 pip install numpy==1.21.6 "pandas>=1.3,<2.0"
 ```
 
-也可使用：
-
-```bash
-pip install -r requirements.txt
-```
-
-> 若使用较新 PyTorch/CUDA 版本，数值结果可能存在轻微差异。论文结果以以上原始实验环境为准。
+The datasets are downloaded automatically by torchvision on first use.
 
 ---
 
-## 3. Unified V2 experimental protocol
-
-### 3.1 Federated learning setting
-
-| Parameter | Value |
-|---|---:|
-| Main datasets | Fashion-MNIST (FMNIST), CIFAR-10 |
-| Clients | 10 |
-| Communication rounds | 100 |
-| Seeds | 3047, 3048, 3049 |
-| Partition | Dirichlet Non-IID |
-| Dirichlet parameter | α = 0.5 (`--gamma 0.5`) |
-| Local epochs | 5 |
-| Batch size | 64 |
-| Optimizer | SGD |
-| Learning rate | 0.01 |
-| Momentum | 0.9 |
-| Weight decay | 1e-4 |
-| Gradient clipping | 20.0 |
-| Aggregation | weighted FedAvg |
-| Eval rounds | round 1, every 5 rounds, and every round in 91–100 |
-| Snapshot rounds | 1, 10, 20, 50, 100 |
-
-### 3.2 Watermark protocol
-
-| Parameter | Value |
-|---|---:|
-| Watermark source | MNIST |
-| WM train | 100 samples/client from official MNIST train split |
-| WM test | 200 samples/client from official MNIST test split |
-| Train/test overlap | none |
-| FMNIST watermark shape | 1 × 28 × 28 |
-| CIFAR-10 watermark shape | 3 × 32 × 32 |
-| WM loss weight | 1.0 |
-
-### 3.3 FedCAGC default configuration
-
-| Parameter | Value |
-|---|---:|
-| Surgery scope | final classifier |
-| EMA coefficient ρ | 0.9 |
-| Negative-conflict threshold τ | 0.0 |
-| Conflict candidate order | initial cosine ascending (most negative first) |
-| Re-check | yes, after every projection |
-| Positive-overlap removal | no |
-| Norm compensation | yes |
-| Max compensation scale | 2.0 |
-| Prototype source | raw / uncorrected watermark gradients |
-| Prototype update | EMA then L2 normalization |
-| Round 1 | cold start, no correction |
-| Round 2+ | conflict-aware correction enabled |
-
----
-
-## 4. Basic preparation
+## Quick start
 
 From the repository root:
 
@@ -138,46 +161,95 @@ export DATA_PATH=$PROJECT/data
 mkdir -p "$DATA_PATH" results/main results/reviewer logs
 ```
 
-Datasets are downloaded automatically by torchvision when first used.
-
-For GPU selection, prepend commands with e.g.:
+Run one CIFAR-10 FedCAGC experiment:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0
+SEED=3047
+CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
+  --dataset cifar10 --method fedcagc \
+  --data_path "$DATA_PATH" --device cuda \
+  --num_clients 10 --rounds 100 --seed $SEED \
+  --local_epochs 5 --local_bs 64 --local_lr 0.01 \
+  --momentum 0.9 --weight_decay 1e-4 \
+  --non_iid --gamma 0.5 \
+  --watermark_source mnist --wm_train_size 100 --wm_test_size 200 --wm_beta 1.0 \
+  --surgery_scope final_classifier --ema_rho 0.9 --tau_neg 0.0 \
+  --wm_compensate --max_comp_scale 2.0 --grad_clip_norm 20 \
+  --eval_every 5 --eval_tail 10 --snapshot_rounds 1,10,20,50,100 \
+  --profile_round \
+  --output_dir "$PROJECT/results/main/cifar10_fedcagc_$SEED"
 ```
 
-All commands below use `--device cuda`. For CPU-only debugging, use `--device cpu`.
+For FMNIST, replace `--dataset cifar10` with `--dataset fmnist` and update the output directory. Repeat with seeds `3047`, `3048`, and `3049` for the reported three-seed results.
 
 ---
 
-## 5. Main experiments
+## Main comparison
 
-All main runs use the following common V2 configuration:
+The final comparison includes:
 
 ```text
---num_clients 10
---rounds 100
---local_epochs 5
---local_bs 64
---local_lr 0.01
---momentum 0.9
---weight_decay 1e-4
---non_iid
---gamma 0.5
---watermark_source mnist
---wm_train_size 100
---wm_test_size 200
---wm_beta 1.0
---grad_clip_norm 20
---eval_every 5
---eval_tail 10
---snapshot_rounds 1,10,20,50,100
---profile_round
+FedAvg
+FedIPR
+FLWB
+FedAWM
+TraMark
+FedCAGC (ours)
 ```
 
-For every method/dataset pair, repeat the command with `SEED=3047`, `SEED=3048`, and `SEED=3049`.
+Results are reported as **mean ± SD over seeds 3047/3048/3049**.
 
-### 5.1 FedAvg
+### FMNIST
+
+| Method      |             MTA |             WMA |          post-WGC |
+| ----------- | --------------: | --------------: | ----------------: |
+| FedAvg      |     91.85±0.15% |               — |                 — |
+| FedIPR      |     91.69±0.10% |     89.58±1.44% |     0.0984±0.0064 |
+| FLWB        |     91.82±0.23% |     78.48±2.71% |     0.0956±0.0065 |
+| FedAWM      |     91.62±0.22% |     89.83±1.55% |     0.0959±0.0051 |
+| TraMark     |     90.29±0.28% |     92.50±0.36% |                 — |
+| **FedCAGC** | **91.69±0.05%** | **89.77±1.29%** | **0.0648±0.0016** |
+
+### CIFAR-10
+
+| Method      |             MTA |             WMA |          post-WGC |
+| ----------- | --------------: | --------------: | ----------------: |
+| FedAvg      |     87.64±0.18% |               — |                 — |
+| FedIPR      |     87.08±0.45% |     90.85±3.94% |     0.0846±0.0102 |
+| FLWB        |     87.24±0.27% |     76.68±3.75% |     0.1003±0.0099 |
+| FedAWM      |     87.42±0.17% |     94.20±0.56% |     0.0928±0.0040 |
+| TraMark     |     85.97±0.37% |     83.60±2.73% |                 — |
+| **FedCAGC** | **87.24±0.43%** | **94.02±0.10%** | **0.0535±0.0095** |
+
+> TraMark additionally achieves `VR = 100.00±0.00%` on both datasets. Its VR measures identity tracing on personalized models and is **not numerically equivalent** to WMA on the shared global model. TraMark does not use the same shared-parameter multi-client WGC definition, so WGC is reported as `—`.
+
+---
+
+## Reproduction map
+
+| Paper experiment                  | Script                             | Main output directory           |
+| --------------------------------- | ---------------------------------- | ------------------------------- |
+| Main comparison                   | `fedcagc_v2_all_methods.py`        | `results/main/`                 |
+| TraMark comparison                | `fedcagc_v2_tramark.py`            | `results/reviewer/tramark/`     |
+| Ablation                          | `fedcagc_v2_all_methods.py`        | `results/reviewer/ablation/`    |
+| Same-round gradient / last-two-FC | `fedcagc_v2_review_experiments.py` | `results/reviewer/mechanism/`   |
+| Projection-order replay           | `fedcagc_v2_offline_review.py`     | `results/reviewer/offline/`     |
+| Ownership / wrong-key             | `fedcagc_v2_offline_review.py`     | `results/reviewer/offline/`     |
+| Prototype leakage                 | `fedcagc_v2_offline_review.py`     | `results/reviewer/offline/`     |
+| Sensitivity                       | `fedcagc_v2_all_methods.py`        | `results/reviewer/sensitivity/` |
+| PCGrad-history                    | `fedcagc_v2_review_experiments.py` | `results/reviewer/pcgrad/`      |
+| Runtime profiling                 | `fedcagc_v2_all_methods.py`        | `results/reviewer/runtime/`     |
+| Fine-tuning / pruning             | `fedcagc_v2_robustness.py`         | `results/reviewer/robustness/`  |
+
+---
+
+<details>
+<summary><b>Full main-baseline commands</b></summary>
+
+
+All commands below use CIFAR-10 as the example. Replace `cifar10` with `fmnist` for FMNIST and repeat each run for seeds `3047/3048/3049`.
+
+### FedAvg
 
 ```bash
 SEED=3047
@@ -190,9 +262,7 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
   --profile_round --output_dir "$PROJECT/results/main/cifar10_fedavg_$SEED"
 ```
 
-FMNIST only changes `--dataset fmnist` and the output directory to `fmnist_fedavg_$SEED`.
-
-### 5.2 FedIPR
+### FedIPR
 
 ```bash
 SEED=3047
@@ -205,9 +275,7 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
   --profile_round --output_dir "$PROJECT/results/main/cifar10_fedipr_$SEED"
 ```
 
-### 5.3 FLWB
-
-Formal setting: `flwb_lambda=1.0`, `flwb_wm_steps=1`.
+### FLWB
 
 ```bash
 SEED=3047
@@ -221,9 +289,7 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
   --profile_round --output_dir "$PROJECT/results/main/cifar10_flwb_$SEED"
 ```
 
-### 5.4 FedAWM
-
-Formal project reproduction parameters: temperature=1.0, min_scale=0.5, max_scale=2.0, EMA=0.8.
+### FedAWM
 
 ```bash
 SEED=3047
@@ -237,43 +303,28 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
   --profile_round --output_dir "$PROJECT/results/main/cifar10_fedawm_$SEED"
 ```
 
-### 5.5 FedCAGC
-
-```bash
-SEED=3047
-CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
-  --dataset cifar10 --method fedcagc --data_path "$DATA_PATH" --device cuda \
-  --num_clients 10 --rounds 100 --seed $SEED --local_epochs 5 --local_bs 64 --local_lr 0.01 \
-  --momentum 0.9 --weight_decay 1e-4 --non_iid --gamma 0.5 \
-  --watermark_source mnist --wm_train_size 100 --wm_test_size 200 --wm_beta 1.0 \
-  --surgery_scope final_classifier --ema_rho 0.9 --tau_neg 0.0 \
-  --wm_compensate --max_comp_scale 2.0 --grad_clip_norm 20 \
-  --eval_every 5 --eval_tail 10 --snapshot_rounds 1,10,20,50,100 \
-  --profile_round --output_dir "$PROJECT/results/main/cifar10_fedcagc_$SEED"
-```
-
-For FMNIST, replace `cifar10` with `fmnist` in `--dataset` and output directory. Repeat all main experiments for seeds 3047/3048/3049.
+</details>
 
 ---
 
-## 6. TraMark (ICLR 2026) reproduction
+<details>
+<summary><b>TraMark reproduction</b></summary>
 
-TraMark uses the **exact FedCAGC V2 client partition and watermark indices** for the same dataset/seed. Therefore run the corresponding FedCAGC main experiment first.
 
-Formal TraMark-specific configuration:
+TraMark uses the **same client partition and watermark train/test indices** as the corresponding FedCAGC V2 run. Therefore, run the matching FedCAGC `dataset/seed` first.
 
-| Parameter | Value |
-|---|---:|
-| Warmup ratio α | 0.5 |
-| Watermark region ratio k | 0.01 |
-| WM epochs | 5 |
-| WM LR | 1e-4 |
-| WM momentum | 0 |
-| WM batch size | 32 |
-| WM gradient mode | `official_accumulate` |
-| WM transform | `official` |
+TraMark-specific parameters:
 
-CIFAR-10 example:
+| Parameter              |                 Value |
+| ---------------------- | --------------------: |
+| Warmup ratio           |                   0.5 |
+| Watermark-region ratio |                  0.01 |
+| WM epochs              |                     5 |
+| WM LR                  |                  1e-4 |
+| WM momentum            |                     0 |
+| WM batch size          |                    32 |
+| WM gradient mode       | `official_accumulate` |
+| WM transform           |            `official` |
 
 ```bash
 SEED=3047
@@ -288,17 +339,17 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_tramark.py \
   --output_dir "$PROJECT/results/reviewer/tramark/cifar10_$SEED"
 ```
 
-Repeat for FMNIST and seeds 3047/3048/3049.
+Repeat for both datasets and all three seeds.
 
-TraMark outputs MTA, WMA, Cross-WMA and Verification Rate (VR). WGC is not reported because TraMark maintains personalized watermark parameter regions instead of one shared multi-watermark global model.
+</details>
 
 ---
 
-## 7. Ablation experiments
+<details>
+<summary><b>Ablation and mechanism experiments</b></summary>
 
-Ablation experiments are run on CIFAR-10 with seeds 3047/3048/3049.
 
-### 7.1 w/o norm compensation
+### w/o norm compensation
 
 ```bash
 SEED=3047
@@ -313,7 +364,7 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
   --output_dir "$PROJECT/results/reviewer/ablation/wocomp_$SEED"
 ```
 
-### 7.2 w/o EMA smoothing
+### w/o EMA
 
 ```bash
 SEED=3047
@@ -328,15 +379,7 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
   --output_dir "$PROJECT/results/reviewer/ablation/woema_$SEED"
 ```
 
-The Full FedCAGC row is the corresponding main experiment and should not be independently redefined with another protocol.
-
----
-
-## 8. EMA prototype and correction-space mechanism experiments
-
-Run all three seeds on CIFAR-10.
-
-### 8.1 Same-round fresh-gradient reference
+### Same-round fresh-gradient reference
 
 ```bash
 SEED=3047
@@ -351,9 +394,7 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_review_experiments.py \
   --output_dir "$PROJECT/results/reviewer/mechanism/fresh_round_start_$SEED"
 ```
 
-This is an oracle-like diagnostic reference, not a theoretical upper bound.
-
-### 8.2 Last-two-FC correction space
+### Last-two-FC correction space
 
 ```bash
 SEED=3047
@@ -368,99 +409,15 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_review_experiments.py \
   --output_dir "$PROJECT/results/reviewer/mechanism/last_two_fc_$SEED"
 ```
 
----
-
-## 9. Projection-order replay and prototype consistency
-
-These analyses use the saved `prototype_snapshots.pt` and `gradient_snapshots.pt` from the FedCAGC main runs. They do not retrain the federated model.
-
-```bash
-python fedcagc_v2_offline_review.py --project "$PROJECT" snapshot --dataset cifar10 --seed 3047 --random_replays 20
-python fedcagc_v2_offline_review.py --project "$PROJECT" snapshot --dataset cifar10 --seed 3048 --random_replays 20
-python fedcagc_v2_offline_review.py --project "$PROJECT" snapshot --dataset cifar10 --seed 3049 --random_replays 20
-```
-
-Outputs:
-
-```text
-results/reviewer/offline/cifar10_seed<seed>_prototype_consistency.csv
-results/reviewer/offline/cifar10_seed<seed>_order_replay.csv
-```
-
-The order replay compares conflict-strength order, fixed Client-ID order, and 20 random orders on fixed saved gradient/prototype snapshots.
+</details>
 
 ---
 
-## 10. Client-level ownership / wrong-key evaluation
+<details>
+<summary><b>PCGrad-history mechanism baseline</b></summary>
 
-Requires FedCAGC and FedAvg main results for both datasets and all three seeds.
 
-```bash
-python fedcagc_v2_offline_review.py --project "$PROJECT" ownership \
-  --datasets cifar10 fmnist --seeds 3047 3048 3049
-```
-
-This produces client-level correct-key / cross-identity wrong-key statistics. The reported cross-identity response is a sample-level response statistic, not a thresholded claim-level FAR.
-
----
-
-## 11. Prototype leakage pressure test
-
-The leakage analysis uses the final FedCAGC checkpoint and historical prototypes. Formal experiments use CIFAR-10 and seeds 3047/3048/3049.
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python fedcagc_v2_offline_review.py --project "$PROJECT" leakage --dataset cifar10 --seed 3047 --batch_size 64 --device cuda
-CUDA_VISIBLE_DEVICES=0 python fedcagc_v2_offline_review.py --project "$PROJECT" leakage --dataset cifar10 --seed 3048 --batch_size 64 --device cuda
-CUDA_VISIBLE_DEVICES=0 python fedcagc_v2_offline_review.py --project "$PROJECT" leakage --dataset cifar10 --seed 3049 --batch_size 64 --device cuda
-```
-
-Outputs include overall ROC-AUC, best balanced accuracy, per-client statistics and raw attack scores.
-
----
-
-## 12. Hyperparameter sensitivity
-
-All sensitivity experiments are CIFAR-10, seeds 3047/3048/3049, and vary one parameter at a time. The center/default configuration (`rho=0.9`, `tau=0`, `smax=2.0`) reuses the main FedCAGC run.
-
-### 12.1 Grid
-
-| Parameter | Values |
-|---|---|
-| EMA ρ | 0.8, **0.9**, 0.99 |
-| τ | **0**, 0.05, 0.10 |
-| smax | 1.5, **2.0**, 2.5 |
-
-### 12.2 rho = 0.8
-
-```bash
-SEED=3047
-CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
-  --dataset cifar10 --method fedcagc --data_path "$DATA_PATH" --device cuda \
-  --num_clients 10 --rounds 100 --seed $SEED --local_epochs 5 --local_bs 64 --local_lr 0.01 \
-  --momentum 0.9 --weight_decay 1e-4 --non_iid --gamma 0.5 \
-  --watermark_source mnist --wm_train_size 100 --wm_test_size 200 --wm_beta 1.0 \
-  --ema_rho 0.8 --tau_neg 0 --wm_compensate --max_comp_scale 2.0 --grad_clip_norm 20 \
-  --eval_every 5 --eval_tail 10 --snapshot_rounds 1,10,20,50,100 --profile_round \
-  --output_dir "$PROJECT/results/reviewer/sensitivity/rho_080_$SEED"
-```
-
-For the remaining settings use the same command and change only:
-
-| Experiment | Changed argument | Output directory |
-|---|---|---|
-| rho=0.99 | `--ema_rho 0.99` | `rho_099_<seed>` |
-| tau=0.05 | `--tau_neg 0.05` | `tau_005_<seed>` |
-| tau=0.10 | `--tau_neg 0.10` | `tau_010_<seed>` |
-| smax=1.5 | `--max_comp_scale 1.5` | `smax_15_<seed>` |
-| smax=2.5 | `--max_comp_scale 2.5` | `smax_25_<seed>` |
-
-Repeat each for 3047, 3048 and 3049.
-
----
-
-## 13. PCGrad-history mechanism baseline
-
-PCGrad-history uses the same historical watermark-gradient prototypes and final-classifier subspace as FedCAGC, but applies PCGrad-style random-order negative-conflict projection and disables norm compensation.
+PCGrad-history shares the historical watermark-gradient prototypes and final-classifier subspace with FedCAGC, but uses random-order PCGrad-style negative-conflict projection and disables bounded norm compensation.
 
 ```bash
 SEED=3047
@@ -475,30 +432,97 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_review_experiments.py \
   --output_dir "$PROJECT/results/reviewer/pcgrad/pcgrad_history_$SEED"
 ```
 
-Repeat for seeds 3047, 3048 and 3049.
+Repeat for seeds 3047/3048/3049.
 
-The paper reports PCGrad-history as a mechanism-level adapted baseline, not as the original centralized PCGrad algorithm.
+Reported CIFAR-10 result:
+
+| Method         |         MTA |         WMA |      post-WGC |
+| -------------- | ----------: | ----------: | ------------: |
+| PCGrad-history | 87.30±0.36% | 94.40±0.74% | 0.6487±0.0119 |
+| FedCAGC        | 87.24±0.43% | 94.02±0.10% | 0.0535±0.0095 |
+
+PCGrad-history is a **mechanism-level adaptation** for this federated-watermark setting, not a direct reproduction of the original centralized PCGrad algorithm.
+
+</details>
 
 ---
 
-## 14. Runtime profiling
+<details>
+<summary><b>Projection-order replay, ownership verification and privacy pressure test</b></summary>
 
-The reported runtime experiment uses CIFAR-10, 5 communication rounds and three seeds. Evaluation is performed every round. Run FedIPR and FedCAGC separately under the same hardware/process conditions.
 
-### 14.1 FedIPR
+These analyses reuse artifacts from the completed FedCAGC main runs.
+
+### Prototype consistency + projection-order replay
 
 ```bash
-SEED=3047
-CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
-  --dataset cifar10 --method fedipr --data_path "$DATA_PATH" --device cuda \
-  --num_clients 10 --rounds 5 --seed $SEED --local_epochs 5 --local_bs 64 --local_lr 0.01 \
-  --momentum 0.9 --weight_decay 1e-4 --non_iid --gamma 0.5 \
-  --watermark_source mnist --wm_train_size 100 --wm_test_size 200 --wm_beta 1.0 \
-  --grad_clip_norm 20 --eval_every 1 --eval_tail 0 --snapshot_rounds 1,5 --profile_round \
-  --output_dir "$PROJECT/results/reviewer/runtime/fedipr_5round_$SEED"
+python fedcagc_v2_offline_review.py --project "$PROJECT" snapshot \
+  --dataset cifar10 --seed 3047 --random_replays 20
 ```
 
-### 14.2 FedCAGC
+Repeat for 3048 and 3049.
+
+### Client-level ownership / wrong-key evaluation
+
+```bash
+python fedcagc_v2_offline_review.py --project "$PROJECT" ownership \
+  --datasets cifar10 fmnist --seeds 3047 3048 3049
+```
+
+### Prototype leakage pressure test
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python fedcagc_v2_offline_review.py --project "$PROJECT" leakage \
+  --dataset cifar10 --seed 3047 --batch_size 64 --device cuda
+```
+
+Repeat for 3048 and 3049.
+
+</details>
+
+---
+
+<details>
+<summary><b>Hyperparameter sensitivity</b></summary>
+
+
+All sensitivity experiments use CIFAR-10 and seeds 3047/3048/3049. One parameter is varied at a time.
+
+| Parameter              | Values             |
+| ---------------------- | ------------------ |
+| EMA coefficient ρ      | 0.8, **0.9**, 0.99 |
+| Conflict threshold τ   | **0**, 0.05, 0.10  |
+| Max compensation scale | 1.5, **2.0**, 2.5  |
+
+Use the standard FedCAGC command and change only the corresponding argument and output directory.
+
+Examples:
+
+```bash
+# rho = 0.8
+--ema_rho 0.8 --tau_neg 0 --max_comp_scale 2.0 \
+--output_dir "$PROJECT/results/reviewer/sensitivity/rho_080_$SEED"
+
+# tau = 0.05
+--ema_rho 0.9 --tau_neg 0.05 --max_comp_scale 2.0 \
+--output_dir "$PROJECT/results/reviewer/sensitivity/tau_005_$SEED"
+
+# smax = 1.5
+--ema_rho 0.9 --tau_neg 0 --max_comp_scale 1.5 \
+--output_dir "$PROJECT/results/reviewer/sensitivity/smax_15_$SEED"
+```
+
+</details>
+
+---
+
+<details>
+<summary><b>Runtime, fine-tuning and pruning robustness</b></summary>
+
+
+### Runtime profiling
+
+The reported runtime comparison uses CIFAR-10, 5 communication rounds and the same three seeds.
 
 ```bash
 SEED=3047
@@ -512,58 +536,35 @@ CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_all_methods.py \
   --output_dir "$PROJECT/results/reviewer/runtime/fedcagc_5round_$SEED"
 ```
 
-Repeat both methods for seeds 3047/3048/3049. Runtime numbers are implementation- and hardware-dependent and should not be treated as hardware-independent constants.
+Use the same command with `--method fedipr` for the reference runtime.
 
----
+### Fine-tuning + pruning
 
-## 15. Fine-tuning and pruning robustness
-
-This script does not retrain federated learning. It loads the corresponding 100-round FedCAGC checkpoint from:
+The robustness script loads the 100-round FedCAGC checkpoint from:
 
 ```text
 results/main/<dataset>_fedcagc_<seed>/final_checkpoint.pt
 ```
 
-Formal settings:
-
-| Fine-tuning | Value |
-|---|---:|
-| Data | clean main-task train data only |
-| WM samples | not used |
-| Epochs | 50 |
-| Batch | 64 |
-| LR | 0.01 |
-| Momentum | 0.9 |
-| Weight decay | 1e-4 |
-| Gradient clipping | 20 |
-
-| Pruning | Value |
-|---|---|
-| Method | global unstructured magnitude pruning |
-| Scope | Conv2d / Linear weights |
-| Ratios (%) | 0, 10, 20, 40, 60, 80, 90, 95, 99 |
-| Post-pruning fine-tune | no |
-| Checkpoint handling | reload original checkpoint for every pruning ratio |
-
-CIFAR-10 example:
-
 ```bash
 SEED=3047
 CUDA_VISIBLE_DEVICES=0 python -u fedcagc_v2_robustness.py \
   --project "$PROJECT" --dataset cifar10 --seed $SEED --device cuda \
-  --num_workers 2 --batch_size 64 --ft_epochs 50 --ft_lr 0.01 \
-  --momentum 0.9 --weight_decay 1e-4 --grad_clip_norm 20 \
+  --num_workers 2 --batch_size 64 \
+  --ft_epochs 50 --ft_lr 0.01 --momentum 0.9 --weight_decay 1e-4 --grad_clip_norm 20 \
   --prune_ratios 0,10,20,40,60,80,90,95,99 \
   --output_dir "$PROJECT/results/reviewer/robustness/cifar10_$SEED"
 ```
 
-Repeat for FMNIST and seeds 3047/3048/3049.
+Repeat for FMNIST and all three seeds.
+
+</details>
 
 ---
 
-## 16. Mean ± SD and 95% confidence intervals
+## Statistics
 
-For the five shared-model main methods:
+Aggregate the shared-model main experiments:
 
 ```bash
 python fedcagc_v2_offline_review.py --project "$PROJECT" stats \
@@ -572,22 +573,13 @@ python fedcagc_v2_offline_review.py --project "$PROJECT" stats \
   --seeds 3047 3048 3049
 ```
 
-This writes:
-
-```text
-results/reviewer/offline/main_seed_metrics.csv
-results/reviewer/offline/main_mean_sd_ci95.csv
-```
-
-TraMark results are stored separately under `results/reviewer/tramark/<dataset>_<seed>/run_summary.json` because TraMark uses personalized models and has an additional VR metric.
-
-The paired t-test values reported in the manuscript were computed on same-seed WGC measurements. With n=3, statistical significance is treated as auxiliary evidence rather than a standalone conclusion.
+The script outputs mean, SD and 95% confidence intervals. Same-seed WGC values are used for paired statistical comparisons where applicable.
 
 ---
 
-## 17. Key output files
+## Key output files
 
-Each main/reviewer training run typically produces:
+A training run may generate:
 
 ```text
 config.json
@@ -601,73 +593,82 @@ prototype_snapshots.pt
 gradient_snapshots.pt
 ```
 
-Depending on the method, some artifacts may be absent or not applicable.
-
-For public GitHub release, large `.pt` checkpoints should normally be distributed via a separate release/archive rather than committed directly to Git history.
+Large `.pt` files are intentionally excluded by `.gitignore`; use GitHub Releases or external storage if pretrained checkpoints need to be distributed.
 
 ---
 
-## 18. Reproduction dependency order
+## Reproduction order
 
-Recommended order:
+For a clean reproduction, the recommended order is:
 
-1. Run all FedCAGC main experiments first.
-2. Run FedAvg/FedIPR/FLWB/FedAWM main baselines.
-3. Run TraMark after the matching FedCAGC split files exist.
-4. Run ablation, fresh-gradient, last-two-FC, sensitivity and PCGrad-history experiments.
-5. Run offline ownership / prototype consistency / order replay / leakage analyses.
-6. Run 5-round runtime profiling under controlled hardware occupancy.
-7. Run fine-tuning/pruning robustness from the 100-round FedCAGC checkpoints.
-8. Run statistics aggregation.
-
----
-
-## 19. Paper-result validation targets
-
-These values are provided only as sanity checks for the final V2 setup; small hardware/software numerical differences are possible.
-
-### FedCAGC, round 100
-
-| Dataset | MTA | WMA | pre-WGC | post-WGC |
-|---|---:|---:|---:|---:|
-| FMNIST | 91.69 ± 0.05% | 89.77 ± 1.29% | 0.0975 ± 0.0040 | 0.0648 ± 0.0016 |
-| CIFAR-10 | 87.24 ± 0.43% | 94.02 ± 0.10% | 0.0922 ± 0.0025 | 0.0535 ± 0.0095 |
-
-### TraMark, round 100
-
-| Dataset | MTA | WMA | VR |
-|---|---:|---:|---:|
-| FMNIST | 90.29 ± 0.28% | 92.50 ± 0.36% | 100.00 ± 0.00% |
-| CIFAR-10 | 85.97 ± 0.37% | 83.60 ± 2.73% | 100.00 ± 0.00% |
-
-### PCGrad-history, CIFAR-10
-
-| Method | MTA | WMA | post-WGC |
-|---|---:|---:|---:|
-| PCGrad-history | 87.30 ± 0.36% | 94.40 ± 0.74% | 0.6487 ± 0.0119 |
-| FedCAGC | 87.24 ± 0.43% | 94.02 ± 0.10% | 0.0535 ± 0.0095 |
+1. FedCAGC main runs for both datasets and all three seeds.
+2. FedAvg / FedIPR / FLWB / FedAWM main baselines.
+3. TraMark, after the matching FedCAGC split files exist.
+4. Ablation, same-round reference, last-two-FC, sensitivity, and PCGrad-history.
+5. Offline ownership, prototype consistency, order replay, and leakage analyses.
+6. Runtime profiling under controlled GPU occupancy.
+7. Fine-tuning/pruning robustness from the final FedCAGC checkpoints.
+8. Statistical aggregation.
 
 ---
 
-## 20. Notes on interpretation
+## Important metric notes
 
-- TraMark VR and FedCAGC WMA are different metrics and should not be treated as numerically equivalent.
-- TraMark WGC is N/A because its personalized watermark regions do not match the shared-global-model WGC definition used by FedCAGC.
-- The same-round fresh-gradient experiment is a diagnostic reference, not a mathematically proven upper bound.
-- Prototype leakage experiments are pressure tests under the specified attack model and do not constitute a formal privacy guarantee.
+- **MTA**: main-task accuracy.
+- **WMA**: watermark verification accuracy.
+- **Min-WMA**: minimum client-level watermark accuracy.
+- **WGC**: watermark-gradient conflict measure in the shared parameter space.
+- **TraMark VR** and **FedCAGC WMA** measure different objects and should not be treated as equivalent.
+- TraMark does not use the same WGC definition and therefore reports WGC as `—`.
 - Cross-identity wrong-key response is a sample-level response statistic; it is not automatically equivalent to thresholded claim-level FAR.
-- Runtime results reflect the specific PyTorch implementation and hardware environment.
-- The final paper does not use the old 70-round protocol, old watermark train/test split, or old scalability/heterogeneity results.
+- The same-round fresh-gradient experiment is a diagnostic reference rather than a theoretical upper bound.
+- The prototype leakage experiment is a pressure test under the specified attack model and does not constitute a formal privacy guarantee.
+- Runtime numbers depend on hardware, framework version, and concurrent GPU load.
 
 ---
 
-## 21. References used by the experimental code
+## Reproducibility checklist
 
-- FedAvg: McMahan et al., AISTATS 2017.
-- FedIPR: ownership verification for federated deep neural network models, IEEE TPAMI 2022.
-- FLWB: federated learning watermark based on model backdoor, Journal of Software 2024.
-- FedAWM: adaptive watermark allocation in Non-IID federated learning, Knowledge-Based Systems 2025.
-- PCGrad: Yu et al., *Gradient Surgery for Multi-Task Learning*, NeurIPS 2020.
-- TraMark: Xu et al., *Traceable Black-Box Watermarks for Federated Learning*, ICLR 2026.
+Before comparing your results with the reported values, verify that:
 
-When using this repository in a publication, please cite the corresponding original baseline papers in addition to the FedCAGC paper.
+- [ ] `dataset ∈ {fmnist, cifar10}`
+- [ ] `num_clients = 10`
+- [ ] `rounds = 100`
+- [ ] `seed ∈ {3047, 3048, 3049}`
+- [ ] `gamma = 0.5`
+- [ ] `local_epochs = 5`
+- [ ] `local_bs = 64`
+- [ ] `local_lr = 0.01`
+- [ ] `wm_train_size = 100`
+- [ ] `wm_test_size = 200`
+- [ ] watermark train/test come from the official MNIST train/test splits respectively
+- [ ] FedCAGC uses `final_classifier`, `ema_rho=0.9`, `tau_neg=0`, `max_comp_scale=2.0`
+- [ ] results are averaged over all three seeds
+
+---
+
+## Citation
+
+The manuscript is currently associated with this repository. Please cite the final publication version once bibliographic information is available.
+
+If you use one of the reproduced baselines, please also cite the corresponding original work (FedAvg, FedIPR, FLWB, FedAWM, PCGrad, and TraMark).
+
+---
+
+## License
+
+No license is bundled by default. Before public reuse is encouraged, add an explicit open-source license (for example, MIT) according to the authors' and institution's requirements.
+
+---
+
+## Contact / Issues
+
+For reproducibility questions, please open a GitHub Issue and include:
+
+- dataset and seed;
+- exact command;
+- `config.json`;
+- `run_summary.json`;
+- relevant error log or traceback.
+
+This makes reproduction issues much easier to diagnose.
