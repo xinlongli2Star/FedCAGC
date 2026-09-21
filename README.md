@@ -4,6 +4,9 @@
 
 FedCAGC is designed for **multi-client black-box watermarking in federated learning**. The method focuses on negative interference among client watermark gradients. It maintains historical watermark-gradient prototypes on the server and performs conflict-aware correction only in the final-classifier subspace, while keeping the global aggregation rule as standard FedAvg.
 
+![Uploading FedCAGC_总体框架图_高仿预览.png…]()
+
+
 ---
 
 ## Highlights
