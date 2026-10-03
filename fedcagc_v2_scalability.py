@@ -1,20 +1,30 @@
-"""FedCAGC V2 client-scale scalability experiment runner.
+"""FedCAGC V2 scalability experiment.
 
-This file is standalone and directly executable. It reproduces the finalized
-30/50-client scalability experiment:
+Formal scalability protocol
+---------------------------
+Main task      : CIFAR-10
+Model          : AlexNet
+Clients        : K = 30 / 50
+Task budget    : exactly 1000 unique CIFAR-10 training samples per client
+Non-IID        : capacity-constrained class-wise Dirichlet, alpha = 0.5
+Watermark      : client-specific WafflePattern
+WM train/test  : 100 / 200 samples per client
+Output space   : num_outputs = K
+Rounds         : 100
+Seeds          : 3047 / 3048 / 3049
 
-  - dataset: CIFAR-10
-  - clients: 30 or 50
-  - methods: FedAvg and FedCAGC only
-  - watermark: client-specific WafflePattern
-  - watermark train/test: 100/200 samples per client, disjoint synthetic indices
-  - output dimension: equal to the client count (30 or 50)
-  - rounds: 100
-  - seeds: 3047, 3048, 3049
-  - remaining FL/FedCAGC hyperparameters follow the finalized V2 protocol.
+Methods
+-------
+fedavg
+    No-watermark main-task reference.
+fedcagc_nocorr
+    Same task/watermark training as FedCAGC, but CAGC correction is disabled.
+fedcagc
+    Full FedCAGC.
 
-The training/evaluation implementation is kept identical to the experiment code
-used for the reported 30/50-client scalability results.
+The fixed 1000-sample local task budget removes the change in per-client
+task-data volume when K increases from 30 to 50. Thus K=30 uses 30,000
+CIFAR-10 training samples and K=50 uses all 50,000 training samples.
 """
 
 import argparse
@@ -189,13 +199,19 @@ class WafflePatternDataset(Dataset):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="FedCAGC V2 scalability runner: CIFAR-10, 30/50 clients, FedAvg/FedCAGC."
+        description="FedCAGC V2 scalability experiment with fixed 1000 task samples/client."
     )
-    parser.add_argument("--dataset", type=str, default="cifar10", choices=["cifar10"])
+    parser.add_argument("--dataset", type=str, default="cifar10", choices=["fmnist", "cifar10", "cifar100"])
     parser.add_argument("--data_path", type=str, default="./data")
     parser.add_argument("--method", type=str, default="fedcagc",
-                        choices=["fedavg", "fedcagc"])
+                        choices=["fedavg", "fedcagc_nocorr", "fedcagc"])
     parser.add_argument("--num_clients", type=int, default=30, choices=[30, 50])
+    parser.add_argument(
+        "--samples_per_client",
+        type=int,
+        default=1000,
+        help="Formal scalability protocol fixes exactly 1000 unique task samples per client.",
+    )
     parser.add_argument("--num_outputs", type=int, default=0,
                         help="0 uses the main dataset class number. Use 30 or 50 for CIFAR-10 scale experiments.")
     parser.add_argument("--rounds", type=int, default=0, help="0 uses dataset default rounds.")
@@ -245,7 +261,7 @@ def parse_args():
     parser.add_argument("--flwb_lambda", type=float, default=1.0)
     parser.add_argument("--flwb_wm_steps", type=int, default=1)
 
-    # FedAWM: preserve the established project reproduction used in the unified comparison protocol.
+    # FedAWM: preserve the established project reproduction used in the submitted manuscript.
     # Allocation is estimated from WATERMARK-TRAINING data only; the official test split is never
     # used for allocation, preventing test leakage.
     parser.add_argument("--awm_temperature", type=float, default=1.0)
@@ -267,10 +283,15 @@ def parse_args():
     parser.add_argument("--eval_tail", type=int, default=10,
                         help="Always evaluate every round in the final N rounds; 0 disables.")
     parser.add_argument("--smoke_test", action="store_true",
-                        help="Engineering-only short run for code checks.")
+                        help="Engineering-only short test; do not use its numbers in the paper.")
     parser.add_argument("--smoke_samples_per_client", type=int, default=128)
     parser.add_argument("--smoke_test_samples", type=int, default=1000)
-    parser.add_argument("--output_dir", type=str, default="./results/experiments/scalability")
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="",
+        help="Run-specific result directory. Empty uses results/reviewer/scalability/<method>_c<K>_s<seed>.",
+    )
     parser.add_argument("--csv_path", type=str, default="",
                         help="Optional CSV path; defaults to OUTPUT_DIR/round_metrics.csv.")
     parser.add_argument("--snapshot_rounds", type=str, default="1,10,20,50,100",
@@ -286,8 +307,12 @@ def parse_args():
         args.num_outputs = args.num_clients
     if args.num_outputs != args.num_clients:
         parser.error("Scalability experiment requires num_outputs == num_clients.")
-    if args.method not in ["fedavg", "fedcagc"]:
-        parser.error("Scalability experiment only supports FedAvg and FedCAGC.")
+    if args.method not in ["fedavg", "fedcagc_nocorr", "fedcagc"]:
+        parser.error(
+            "Scalability experiment only supports FedAvg, FedCAGC w/o correction, and FedCAGC."
+        )
+    if args.samples_per_client != 1000:
+        parser.error("Formal scalability protocol fixes --samples_per_client=1000.")
     if args.watermark_source == "mnist" and args.num_clients > 10:
         parser.error("MNIST-label watermark supports at most 10 clients.")
     if not 0.0 <= args.ema_rho < 1.0:
@@ -356,6 +381,11 @@ def parse_args():
     if args.device == "auto":
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
     args.device = torch.device(args.device)
+    if not args.output_dir:
+        args.output_dir = str(
+            Path("./results/reviewer/scalability")
+            / f"{args.method}_c{args.num_clients}_s{args.seed}"
+        )
     args.output_dir = str(Path(args.output_dir).expanduser().resolve())
     if not args.csv_path:
         args.csv_path = str(Path(args.output_dir) / "round_metrics.csv")
@@ -709,6 +739,188 @@ def dirichlet_partition(dataset: Dataset, num_clients: int, gamma: float, seed: 
     for i in range(num_clients):
         rng.shuffle(client_indices[i])
     return {i: client_indices[i] for i in range(num_clients)}
+
+
+
+def fixed_budget_iid_partition(
+    dataset: Dataset,
+    num_clients: int,
+    samples_per_client: int,
+    seed: int,
+) -> Dict[int, List[int]]:
+    """IID partition with an exact, non-overlapping sample budget per client."""
+    total_required = num_clients * samples_per_client
+    if total_required > len(dataset):
+        raise ValueError(
+            f"Need {total_required} task samples, but dataset only contains {len(dataset)}."
+        )
+
+    rng = np.random.default_rng(seed)
+    indices = np.arange(len(dataset))
+    rng.shuffle(indices)
+    selected = indices[:total_required]
+
+    return {
+        cid: selected[
+            cid * samples_per_client : (cid + 1) * samples_per_client
+        ].tolist()
+        for cid in range(num_clients)
+    }
+
+
+def fixed_budget_dirichlet_partition(
+    dataset: Dataset,
+    num_clients: int,
+    gamma: float,
+    seed: int,
+    samples_per_client: int = 1000,
+):
+    """Capacity-constrained class-wise Dirichlet partition.
+
+    Invariants:
+      * exactly ``samples_per_client`` task samples per client;
+      * no sample is shared by two clients;
+      * the selected global subset is class-balanced;
+      * class/client preferences are sampled from Dirichlet(gamma).
+
+    For CIFAR-10:
+      K=30 -> 30,000 samples -> 3,000 samples/class;
+      K=50 -> 50,000 samples -> 5,000 samples/class.
+    """
+    if gamma <= 0:
+        raise ValueError("gamma must be positive.")
+    if samples_per_client <= 0:
+        raise ValueError("samples_per_client must be positive.")
+
+    rng = np.random.default_rng(seed)
+    targets = np.asarray(dataset.targets)
+    num_classes = int(targets.max()) + 1
+    total_required = num_clients * samples_per_client
+
+    if total_required > len(dataset):
+        raise ValueError(
+            f"Need {total_required} task samples, but dataset only contains {len(dataset)}."
+        )
+
+    # Fix the selected global label prior across K as much as possible.
+    base_quota = total_required // num_classes
+    remainder = total_required % num_classes
+    class_quotas = np.full(num_classes, base_quota, dtype=np.int64)
+    class_quotas[:remainder] += 1
+
+    available_per_class = np.bincount(targets, minlength=num_classes)
+    if np.any(class_quotas > available_per_class):
+        raise ValueError(
+            "Requested class quota exceeds available samples: "
+            f"quota={class_quotas.tolist()}, "
+            f"available={available_per_class.tolist()}"
+        )
+
+    # Per-class client preferences follow a standard class-wise Dirichlet draw.
+    class_client_preferences = np.stack(
+        [
+            rng.dirichlet(np.repeat(gamma, num_clients))
+            for _ in range(num_classes)
+        ],
+        axis=0,
+    )  # [num_classes, num_clients]
+
+    # Random class-assignment order prevents the last few classes from being
+    # systematically distorted by already-filled client capacities.
+    class_schedule = np.repeat(np.arange(num_classes), class_quotas)
+    rng.shuffle(class_schedule)
+
+    remaining = np.full(num_clients, samples_per_client, dtype=np.int64)
+    client_class_counts = np.zeros(
+        (num_clients, num_classes), dtype=np.int64
+    )
+
+    for cls in class_schedule:
+        weights = class_client_preferences[cls].copy()
+        active = remaining > 0
+        weights *= active
+
+        # Soft capacity weighting retains the sampled Dirichlet preference while
+        # discouraging premature saturation of a client.
+        weights *= remaining.astype(np.float64) / float(samples_per_client)
+
+        if float(weights.sum()) <= 0.0:
+            weights = active.astype(np.float64)
+
+        weights /= weights.sum()
+        cid = int(rng.choice(num_clients, p=weights))
+        client_class_counts[cid, cls] += 1
+        remaining[cid] -= 1
+
+    if np.any(remaining != 0):
+        raise RuntimeError(
+            "Fixed-budget allocation failed; "
+            f"remaining capacities={remaining.tolist()}"
+        )
+
+    # Map the integer client/class allocation to real CIFAR-10 indices
+    # without replacement.
+    client_indices = [[] for _ in range(num_clients)]
+
+    for cls in range(num_classes):
+        pool = np.where(targets == cls)[0]
+        rng.shuffle(pool)
+
+        needed = int(client_class_counts[:, cls].sum())
+        selected = pool[:needed]
+
+        cursor = 0
+        for cid in range(num_clients):
+            count = int(client_class_counts[cid, cls])
+            if count:
+                client_indices[cid].extend(
+                    selected[cursor : cursor + count].tolist()
+                )
+                cursor += count
+
+    for cid in range(num_clients):
+        rng.shuffle(client_indices[cid])
+
+    # Formal experiment checks.
+    sizes = [len(indices) for indices in client_indices]
+    if any(size != samples_per_client for size in sizes):
+        raise RuntimeError(
+            f"Expected exactly {samples_per_client} samples/client, got {sizes}."
+        )
+
+    flat = [idx for group in client_indices for idx in group]
+    if len(flat) != len(set(flat)):
+        raise RuntimeError(
+            "Task partition contains duplicated CIFAR-10 samples across clients."
+        )
+
+    observed_class_counts = np.zeros(
+        (num_clients, num_classes), dtype=np.int64
+    )
+    for cid, indices in enumerate(client_indices):
+        observed_class_counts[cid] = np.bincount(
+            targets[np.asarray(indices, dtype=np.int64)],
+            minlength=num_classes,
+        )
+
+    metadata = {
+        "partition": "capacity_constrained_classwise_dirichlet",
+        "alpha": float(gamma),
+        "num_clients": int(num_clients),
+        "samples_per_client": int(samples_per_client),
+        "total_selected_samples": int(total_required),
+        "total_dataset_samples": int(len(dataset)),
+        "unused_samples": int(len(dataset) - total_required),
+        "class_quotas": class_quotas.tolist(),
+        "client_sizes": [int(x) for x in sizes],
+        "client_class_counts": observed_class_counts.tolist(),
+        "unique_samples_across_clients": int(len(set(flat))),
+    }
+
+    return (
+        {cid: client_indices[cid] for cid in range(num_clients)},
+        metadata,
+    )
 
 
 def trainable_params(model: nn.Module) -> List[nn.Parameter]:
@@ -1110,7 +1322,7 @@ def train_client_flwb(client_id: int, global_model: nn.Module, task_dataset: Dat
                 raw_part = flatten_grads(selected_grads, selected).detach()
                 raw_steps.append(raw_part)
 
-                # Algorithm-5 style delta enhancement. Keep the established reproduction setting's
+                # Algorithm-5 style delta enhancement. Keep the submitted project's
                 # established reproduction: one explicit watermark-gradient step per task batch.
                 clip_coef = 1.0
                 if args.grad_clip_norm > 0:
@@ -1153,7 +1365,7 @@ def train_client_by_method(client_id: int, global_model: nn.Module, task_dataset
         local_args.wm_beta = args.wm_beta * float(allocation_scale)
     elif args.method == "fdwa":
         local_args.wm_beta = args.fdwa_alpha
-    # fedipr and fedcagc retain wm_beta=1.0 in the formal V2 protocol.
+    # FedCAGC and FedCAGC w/o correction retain wm_beta=1.0.
     return train_client(client_id, global_model, task_dataset, wm_dataset, prototypes,
                         True, bool(use_surgery), round_id, local_args)
 
@@ -1422,11 +1634,9 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     references = {
-        "fedipr": "Li et al., FedIPR: Ownership Verification for Federated Deep Neural Network Models, IEEE TPAMI, DOI 10.1109/TPAMI.2022.3195956",
-        "flwb": "Li et al., Federated Learning Watermark Based on Model Backdoor, Journal of Software 2024, DOI 10.13328/j.cnki.jos.006914",
-        "fedawm": "Sun et al., FedAWM: Adaptive Watermark Allocation in Non-IID Federated Learning, Knowledge-Based Systems 332:114938, DOI 10.1016/j.knosys.2025.114938",
-        "fdwa": "Sun & Tian, Distributed Watermarking and Anti-attack Scheme in Federated Learning, Journal of Software 2026, DOI 10.13328/j.cnki.jos.007665",
-        "fedcagc": "FedCAGC",
+        "fedavg": "No-watermark main-task reference under the same scalability setting",
+        "fedcagc_nocorr": "Ablation: identical watermark training as FedCAGC with conflict correction disabled",
+        "fedcagc": "Full proposed FedCAGC method",
     }
     config = dict(vars(args))
     config.update({
@@ -1436,12 +1646,17 @@ def main():
         "torch_version": torch.__version__,
         "numpy_version": np.__version__,
         "references": references,
-        "comparison_protocol": {
-            "fedipr_flwb_fedawm_fedcagc_watermark": "same official MNIST train100/test200 trigger sets and target labels, per unified comparison protocol fairness protocol",
-            "fdwa_watermark": "identity-trigger mechanism from cited 2026 paper, official task train100/test200 base samples",
-            "fedipr_scope": "black-box/backdoor branch only; white-box feature watermark excluded",
-            "fdwa_scope": "black-box identity-trigger + FDWA aggregation only; BN fingerprint/traitor-tracing branch excluded",
-            "fedawm_scope": "established project reproduction carried forward unchanged in mechanism; allocation uses watermark-training loss only and never test data",
+        "scalability_protocol": {
+            "main_task": "CIFAR-10",
+            "model": "AlexNet",
+            "clients": [30, 50],
+            "samples_per_client": 1000,
+            "partition": "capacity-constrained class-wise Dirichlet alpha=0.5",
+            "watermark": "client-specific WafflePattern",
+            "wm_train_per_client": 100,
+            "wm_test_per_client": 200,
+            "output_dimension": "equal to number of clients",
+            "methods": ["fedavg", "fedcagc_nocorr", "fedcagc"],
         },
         "fedcagc_constraints": {
             "negative_conflict_only": True,
@@ -1454,9 +1669,9 @@ def main():
     })
     save_json(output_dir / "config.json", config)
 
-    print("========== FedCAGC V2 Unified Comparison ==========")
+    print("========== FedCAGC V2 Scalability Experiment ==========")
     for name in [
-        "dataset", "method", "device", "num_clients", "num_outputs", "rounds", "local_epochs",
+        "dataset", "method", "device", "num_clients", "samples_per_client", "num_outputs", "rounds", "local_epochs",
         "local_bs", "local_lr", "non_iid", "gamma", "wm_beta", "wm_train_size", "wm_test_size",
         "grad_clip_norm", "seed",
     ]:
@@ -1478,13 +1693,58 @@ def main():
     else:
         wm_train_sets, wm_extra_sets, wm_test_sets, target_labels, wm_metadata = build_watermark_datasets(args)
 
-    user_groups = dirichlet_partition(train_dataset, args.num_clients, args.gamma, args.seed) if args.non_iid else iid_partition(train_dataset, args.num_clients, args.seed)
+    if args.non_iid:
+        user_groups, partition_metadata = fixed_budget_dirichlet_partition(
+            train_dataset,
+            args.num_clients,
+            args.gamma,
+            args.seed,
+            samples_per_client=args.samples_per_client,
+        )
+    else:
+        user_groups = fixed_budget_iid_partition(
+            train_dataset,
+            args.num_clients,
+            args.samples_per_client,
+            args.seed,
+        )
+        partition_metadata = {
+            "partition": "fixed_budget_iid",
+            "num_clients": args.num_clients,
+            "samples_per_client": args.samples_per_client,
+            "total_selected_samples": args.num_clients * args.samples_per_client,
+            "total_dataset_samples": len(train_dataset),
+            "unused_samples": (
+                len(train_dataset)
+                - args.num_clients * args.samples_per_client
+            ),
+            "client_sizes": [args.samples_per_client] * args.num_clients,
+        }
+
     if args.smoke_test:
-        print("\nWARNING: smoke_test is enabled; these results are only for code-path validation.")
-        user_groups = {cid: idxs[:min(len(idxs), args.smoke_samples_per_client)] for cid, idxs in user_groups.items()}
-        test_dataset = Subset(test_dataset, list(range(min(len(test_dataset), args.smoke_test_samples))))
-    client_task_sets = [Subset(train_dataset, user_groups[i]) for i in range(args.num_clients)]
+        print(
+            "\nWARNING: smoke_test is enabled; "
+            "these results are only for code-path validation."
+        )
+        user_groups = {
+            cid: idxs[: min(len(idxs), args.smoke_samples_per_client)]
+            for cid, idxs in user_groups.items()
+        }
+        test_dataset = Subset(
+            test_dataset,
+            list(range(min(len(test_dataset), args.smoke_test_samples))),
+        )
+
+    client_task_sets = [
+        Subset(train_dataset, user_groups[i])
+        for i in range(args.num_clients)
+    ]
+
     save_json(output_dir / "client_partition.json", user_groups)
+    save_json(
+        output_dir / "partition_metadata.json",
+        partition_metadata,
+    )
     save_json(output_dir / "watermark_split.json", wm_metadata)
 
     print("\nClient task data sizes:")
@@ -1523,8 +1783,18 @@ def main():
         round_start = time.perf_counter()
         print(f"\n-------- Round {rnd:03d}/{args.rounds:03d} --------")
 
-        use_surgery = is_cagc_method(args.method) and rnd >= 2 and all(p is not None for p in prototypes)
-        round_prototypes = [None if p is None else p.detach().clone() for p in prototypes]
+        # Full FedCAGC activates CAGC from round 2 onward.
+        # fedcagc_nocorr keeps identical watermark training but never corrects
+        # the watermark gradient.
+        use_surgery = (
+            args.method == "fedcagc"
+            and rnd >= 2
+            and all(p is not None for p in prototypes)
+        )
+        round_prototypes = [
+            None if p is None else p.detach().clone()
+            for p in prototypes
+        ]
         if args.method == "fedcagc" and rnd == 1:
             print("Cold-start round: no correction; collect raw watermark gradients for historical prototypes.")
         elif args.method == "fedcagc" and rnd == 2:
@@ -1594,31 +1864,20 @@ def main():
             eval_phase_start = time.perf_counter()
             mta, main_loss = evaluate_task(global_model, test_dataset, args)
             if args.method == "fedavg":
-                per_client_wma = np.full(args.num_clients, np.nan, dtype=np.float64)
-                wma = min_wma = wm_loss = cross_wma = float("nan")
-                wma_train = min_wma_train = float("nan")
-                wma_extra = min_wma_extra = float("nan")
-                global_conflicts = {
-                    "wgc_pre": float("nan"), "wgc_post": float("nan"),
-                    "conflict_rate_pre": float("nan"), "conflict_rate_post": float("nan"),
-                    "mean_cos_pre": float("nan"), "mean_cos_post": float("nan"),
-                    "raw_grads": [], "corrected_grads": [],
-                }
+                # Still measure accidental trigger response for diagnostics, but do not interpret it as watermark ownership.
+                per_client_wma, wma, min_wma, wm_loss, cross_wma = evaluate_watermarks(global_model, wm_test_sets, target_labels, args)
             else:
-                per_client_wma, wma, min_wma, wm_loss, cross_wma = evaluate_watermarks(
-                    global_model, wm_test_sets, target_labels, args
-                )
-                if rnd == args.rounds:
-                    _, wma_train, min_wma_train, _, _ = evaluate_watermarks(
-                        global_model, wm_train_sets, target_labels, args
-                    )
-                else:
-                    wma_train = min_wma_train = float("nan")
-                wma_extra, min_wma_extra = wma, min_wma
-                global_conflicts = evaluate_global_gradient_conflicts(
-                    global_model, wm_train_sets, round_prototypes,
-                    use_correction=use_surgery, args=args
-                )
+                per_client_wma, wma, min_wma, wm_loss, cross_wma = evaluate_watermarks(global_model, wm_test_sets, target_labels, args)
+            if rnd == args.rounds:
+                _, wma_train, min_wma_train, _, _ = evaluate_watermarks(global_model, wm_train_sets, target_labels, args)
+            else:
+                wma_train = min_wma_train = float("nan")
+            wma_extra, min_wma_extra = wma, min_wma
+
+            global_conflicts = evaluate_global_gradient_conflicts(
+                global_model, wm_train_sets, round_prototypes,
+                use_correction=use_surgery, args=args
+            )
             if rnd in args.snapshot_rounds:
                 gradient_snapshots[rnd] = {"raw": global_conflicts["raw_grads"], "corrected": global_conflicts["corrected_grads"]}
             if args.device.type == "cuda": torch.cuda.synchronize(args.device)
@@ -1656,20 +1915,15 @@ def main():
     print(f"Dataset               : {args.dataset}")
     print(f"Method                : {args.method}")
     print(f"Final MTA             : {final['mta']:.4f}")
-    if args.method == "fedavg":
-        print("Final WMA             : N/A")
-        print("Final WGC pre/post    : N/A / N/A")
-    else:
-        print(f"Final WMA             : {final['wma']:.4f}")
-        print(f"Final Min-WMA         : {final['min_wma']:.4f}")
-        print(f"Final WGC pre/post    : {final['eval_wgc_pre']:.4f} / {final['eval_wgc_post']:.4f}")
-        print("Final WMA per client  :", " ".join(f"{x:.4f}" for x in final["per_client_wma"]))
+    print(f"Final WMA             : {final['wma']:.4f}")
+    print(f"Final Min-WMA         : {final['min_wma']:.4f}")
+    print(f"Final WGC pre/post    : {final['eval_wgc_pre']:.4f} / {final['eval_wgc_post']:.4f}")
+    print("Final WMA per client  :", " ".join(f"{x:.4f}" for x in final["per_client_wma"]))
     save_history_csv(history, args)
 
-    if args.method != "fedavg":
-        verification_matrix = evaluate_verification_matrix(global_model, wm_test_sets, target_labels, args)
-        np.save(output_dir / "verification_matrix.npy", verification_matrix)
-        save_matrix_csv(output_dir / "verification_matrix.csv", verification_matrix)
+    verification_matrix = evaluate_verification_matrix(global_model, wm_test_sets, target_labels, args)
+    np.save(output_dir / "verification_matrix.npy", verification_matrix)
+    save_matrix_csv(output_dir / "verification_matrix.csv", verification_matrix)
     checkpoint_state = {key: value.detach().cpu() for key, value in global_model.state_dict().items()}
     torch.save({"model_state_dict": checkpoint_state, "prototypes": cpu_prototypes(prototypes),
                 "config": json_ready(config), "final_record": json_ready(final)}, output_dir / "final_checkpoint.pt")
@@ -1685,6 +1939,9 @@ def main():
     offdiag = float("nan") if args.method == "fdwa" else float((verification_matrix.sum() - np.trace(verification_matrix)) / max(1, verification_matrix.size - len(verification_matrix)))
     run_summary = {
         "dataset": args.dataset, "method": args.method, "seed": args.seed, "rounds": args.rounds,
+        "num_clients": args.num_clients,
+        "samples_per_client": args.samples_per_client,
+        "total_selected_task_samples": args.num_clients * args.samples_per_client,
         "final_mta": final["mta"], "final_wma": final["wma"], "final_min_wma": final["min_wma"],
         "final_std_wma": final["std_wma"], "final_wgc_pre": final["eval_wgc_pre"], "final_wgc_post": final["eval_wgc_post"],
         "total_seconds": total_seconds, "mean_recorded_round_seconds": float(np.mean([x["round_seconds"] for x in history])),
