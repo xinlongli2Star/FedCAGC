@@ -228,7 +228,7 @@ The attack compares candidate-sample watermark gradients with the target client'
 | Dataset | Initial WMA | 50-epoch clean fine-tuning | 60% pruning | 80% pruning | 90% pruning | 95% pruning | 99% pruning |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | FMNIST | 92.60±1.30% | 85.45±5.71% | 91.85±1.26% | 87.10±1.78% | 66.97±8.16% | 36.70±4.80% | 14.55±3.48% |
-| CIFAR-10 | 96.67±0.15% | 88.93±0.76% | 96.62±0.10% | 95.83±0.56% | 94.12±1.50% | 62.92±2.11% | 12.70±0.00% |
+| CIFAR-10 | 96.67±0.15% | 88.93±0.76% | 96.62±0.10% | 95.83±0.56% | 94.12±1.50% | 62.92±2.11% | 12.70±0.23% |
 
 ### 30/50-client scalability
 
