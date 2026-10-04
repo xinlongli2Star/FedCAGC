@@ -3,7 +3,7 @@
 Official reproduction code for **“基于冲突感知梯度修正的联邦学习水印方法”**.
 
 [中文说明](README_zh.md)
-
+![Framework](./Framework.png)
 FedCAGC targets negative gradient interference among multiple client-specific private watermarks in synchronous federated learning. Conflict detection and correction are restricted to the watermark-gradient subspace of the final classification layer. The server maintains one historical watermark-gradient prototype for each client using an exponential moving average (EMA), while the server-side model aggregation rule remains weighted FedAvg.
 
 ## Repository
